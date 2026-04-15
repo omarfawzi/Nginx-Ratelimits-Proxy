@@ -1,127 +1,143 @@
+<div align="center">
+
+# 🛡️ NGINX Rate Limiter Proxy
+
+**A distributed, lightweight reverse proxy for traffic regulation and rate limiting — built with OpenResty, Lua, and Redis.**
+
 ![Test Status](https://github.com/omarfawzi/Nginx-Ratelimits-Proxy/actions/workflows/ci.yml/badge.svg)
 [![codecov](https://codecov.io/github/omarfawzi/Nginx-Ratelimits-Proxy/graph/badge.svg?token=UAFTLUSL8R)](https://codecov.io/github/omarfawzi/Nginx-Ratelimiter-Proxy)
 
-# 📌 NGINX Rate Limiter Proxy
+---
 
-- [Overview](#overview)  
-- [Key Features](#key-features)  
-- [Architecture](#architecture)  
-- [Interaction Flow](#interaction-flow)  
-  - [Client Request](#interaction-flow)  
-  - [NGINX Proxy](#interaction-flow)  
-  - [Rate Limiting](#interaction-flow)  
-  - [Decision-Making & Request Handling](#interaction-flow)  
-  - [Main Application](#interaction-flow)  
-  - [Response](#interaction-flow)  
-- [Configuration](#configuration)  
-  - [Rate Limit Rules](#rate-limit-rules)  
-  - [Environment Variables](#environment-variables)  
-- [Running the Proxy](#running-the-proxy)  
-  - [Docker Setup](#running-the-proxy)  
-  - [Custom Resolver](#custom-resolver)  
-- [Why Use Redis Over Memcached?](#-why-use-redis-over-memcached-for-rate-limiting)  
-  - [Atomic Operations](#-atomic-operations)  
-  - [Support for Different Algorithms](#-support-for-different-algorithms)  
-  - [Avoiding Redis Replicas](#%EF%B8%8F-important-avoid-using-redis-replicas-for-rate-limiting)
-- [Extending Nginx Configuration with Snippets](#%EF%B8%8F-extending-nginx-configuration-with-snippets)
-  - [How It Works](#how-it-works) 
-  - [How to Add Custom Snippets](#how-to-add-custom-snippets) 
-- [Prometheus](#prometheus)  
-- [Request Flow](#request-flow)
+Intercepts incoming traffic and enforces rate limits **before requests reach your backend**.  
+Designed as a **Kubernetes sidecar**, powered by **NGINX + Lua**, backed by **Redis** or **Memcached**.
 
-## Overview
+</div>
 
-This **distributed** lightweight rate limiter serves as a **reverse proxy**, regulating incoming traffic and enforcing rate limits **before requests reach your backend**. By controlling excessive traffic and potential abuse, it enhances both security and performance.
+---
 
-## Key Features
+## 📖 Table of Contents
 
-- **Kubernetes Sidecar Proxy**: Designed to manage traffic **before it enters your main application container**, ensuring seamless rate limiting within a Kubernetes environment.
-- **NGINX + Lua**: Implemented using **Lua scripting within NGINX**, leveraging `lua-resty-global-throttle` and `lua-resty-redis`.
-- **Flexible Caching**: Supports both **Redis** and **Memcached** as distributed caching providers.
-- **Configurable Rules**: Rate limit rules are **defined in a YAML file**, allowing for flexible and dynamic configurations.
+- [Key Features](#-key-features)
+- [Architecture](#-architecture)
+- [Interaction Flow](#-interaction-flow)
+- [Configuration](#-configuration)
+  - [Rate Limit Rules](#rate-limit-rules)
+  - [Environment Variables](#environment-variables)
+- [Running the Proxy](#-running-the-proxy)
+- [Why Redis Over Memcached?](#-why-redis-over-memcached)
+- [Extending with Snippets](#-extending-nginx-configuration-with-snippets)
+- [Prometheus Metrics](#-prometheus-metrics)
+- [Request Flow](#-request-flow)
 
-## Architecture
+---
+
+## ✨ Key Features
+
+| Feature | Description |
+|---|---|
+| **Kubernetes Sidecar** | Manages traffic before it enters your main application container |
+| **NGINX + Lua** | Leverages `lua-resty-global-throttle` and `lua-resty-redis` for high-performance rate limiting |
+| **Flexible Caching** | Supports both **Redis** and **Memcached** as distributed cache backends |
+| **Multiple Algorithms** | Fixed window, sliding window, leaky bucket, and token bucket |
+| **Configurable Rules** | YAML-driven configuration with per-user, per-IP, CIDR, and global rules |
+| **Prometheus Metrics** | Built-in observability with request count, latency, and connection gauges |
+
+---
+
+## 🏗 Architecture
 
 ```mermaid
-graph TD
-   subgraph Infrastructure
-      B[Nginx Proxy] -- Rate Limit Check --> C{Cache Provider}
-      C -- 429 Too Many Requests --> B
+graph LR
+    Client([🌐 Client]):::clientStyle
 
-      style B fill:#f9f,stroke:#333,stroke-width:2px
-      style C fill:#ccf,stroke:#333,stroke-width:2px
-      style B fill:#f9f,stroke:#333,stroke-width:2px
-      classDef rate_limiting fill:#ffc,stroke:#333;
-      class C rate_limiting
-   end
+    subgraph proxy [" 🔒 NGINX Rate Limiter Proxy "]
+        direction TB
+        Receive["Receive Request"]:::proxyStep
+        RateCheck{"Check Rate Limit"}:::decisionStyle
+        Forward["Forward Request"]:::proxyStep
+        Block["429 Too Many Requests"]:::blockStyle
+    end
 
-   subgraph Application
-      E[Main Application]
-      style E fill:#eef,stroke:#333,stroke-width:2px
-   end
+    subgraph cache [" 💾 Cache Backend "]
+        direction TB
+        Redis[("Redis / Memcached")]:::cacheStyle
+    end
 
-   B -- Forward if allowed --> E
-   E -- Response --> B
-   B -- Response --> A
-   A -- Request --> B
+    subgraph app [" ⚙️ Application "]
+        direction TB
+        Backend["Main Application"]:::appStyle
+    end
 
-   classDef external fill:#eee,stroke:#333
-   class A external
+    Client -- "① Request" --> Receive
+    Receive --> RateCheck
+    RateCheck -- "Query counters" --> Redis
+    Redis -- "Within limit ✅" --> Forward
+    Redis -- "Over limit ❌" --> Block
+    Forward -- "② Proxy" --> Backend
+    Backend -- "③ Response" --> Forward
+    Block -- "③ 429" --> Client
+    Forward -- "④ Response" --> Client
 
-   classDef container fill:#ccf,stroke:#333
-   class E container
+    classDef clientStyle fill:#e8eaf6,stroke:#3949ab,stroke-width:2px,color:#1a237e,font-weight:bold
+    classDef proxyStep fill:#e1f5fe,stroke:#0288d1,stroke-width:1.5px,color:#01579b
+    classDef decisionStyle fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#e65100,font-weight:bold
+    classDef blockStyle fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#b71c1c,font-weight:bold
+    classDef cacheStyle fill:#fff8e1,stroke:#f9a825,stroke-width:2px,color:#f57f17
+    classDef appStyle fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20,font-weight:bold
 
-   classDef proxy fill:#f9f,stroke:#333
-   class B proxy
-
-   linkStyle 0,1,2,3 stroke:#0aa,stroke-width:2px;
-   linkStyle 4,5 stroke:#080,stroke-width:2px;
-   
-   classDef cache fill:#ddf,stroke:#333
-   class D1,D2,D3 cache
-
-   subgraph Client
-      A[Client]
-   end
+    style proxy fill:#f3f8ff,stroke:#0288d1,stroke-width:2px,stroke-dasharray:5 5,color:#01579b
+    style cache fill:#fffde7,stroke:#f9a825,stroke-width:2px,stroke-dasharray:5 5,color:#f57f17
+    style app fill:#f1f8e9,stroke:#2e7d32,stroke-width:2px,stroke-dasharray:5 5,color:#1b5e20
 ```
 
-## Interaction Flow
+---
 
-1. **Client Request**: The client sends a request to the application.
-2. **NGINX Proxy**: The request is intercepted by the NGINX proxy.
-3. **Rate Limiting**: The proxy checks the request against the rate limiting rules defined in the YAML file.
-4. **Decision-Making & Request Handling**:
-   - **Ignored Segments**: The request IP/user is first checked against the ignoredSegments configuration. If matched, rate limiting is bypassed, and the request is forwarded.
-   - **Rate Limit Exceeded**: If the request exceeds the defined rate limit, a `429 Too Many Requests` response is immediately returned to the client.
-   - **Rate Limit Within Limits**: If the request is within the rate limit, it is proxied to the main application.
-   - **Lua Exception Handling**: In the event of an exception within the Lua rate limiting script, the request is still proxied to the main application (this should be carefully considered and potentially logged/monitored).
-   - **Rules Precedence**: Explicit IP addresses in the configuration take priority over users and generic CIDR ranges (e.g., 0.0.0.0/0).
-5. **Main Application**: The request is processed by the main application if it passes the rate limiting check.
-6. **Response**: The main application's response travels back through the NGINX proxy to the client.
+## 🔄 Interaction Flow
 
-## Configuration
+| Step | Description |
+|---:|---|
+| **1** | **Client** sends a request to the application |
+| **2** | **NGINX Proxy** intercepts the request |
+| **3** | **Rate Limiter** checks the request against rules defined in `ratelimits.yaml` |
+| **4** | **Decision** is made — see details below |
+| **5** | **Main Application** processes the request if it passes |
+| **6** | **Response** travels back through the proxy to the client |
+
+### Decision Logic (Step 4)
+
+- **Ignored Segments** — If the IP, user, or URL matches `ignoredSegments`, rate limiting is bypassed entirely.
+- **Rate Limit Exceeded** — Returns `429 Too Many Requests` immediately.
+- **Within Limits** — Request is proxied to the main application.
+- **Lua Exception** — On error, the request is still forwarded (fail-open). Monitor this carefully.
+
+> **Rule Precedence:** Explicit IP addresses take priority over users, which take priority over CIDR ranges (e.g., `0.0.0.0/0`).
+
+---
+
+## ⚙ Configuration
 
 ### Rate Limit Rules
 
-Rate limit rules are defined in the ratelimits.yaml file. The structure of the YAML file is as follows:
+Rules are defined in `ratelimits.yaml` and mounted into the container:
 
 ```yaml
 ignoredSegments:
-   users:
-      - admin
-   ips:
-      - 127.0.0.1
-   urls: 
-     - /v1/ping
+  users:
+    - admin
+  ips:
+    - 127.0.0.1
+  urls:
+    - /v1/ping
 
 rules:
   /v1:
     users:
-      user2: 
+      user2:
         limit: 50
         window: 60
     ips:
-      192.168.1.1: 
+      192.168.1.1:
         limit: 200
         window: 60
   ^/v2/[0-9]$:
@@ -131,44 +147,45 @@ rules:
         limit: 30
         window: 60
 ```
-- `ignoredSegments`: Defines users, IPs and URLs for which rate limiting should be skipped. This is useful for administrative users, urls or specific trusted IPs.
-- `rules`: Contains the rate limit rules for different URI paths.
-- `path`: The URI path to which the rate limit applies, to apply ratelimits for all paths you can provide `/` as a global path, for regex paths refer to https://github.com/openresty/lua-nginx-module?tab=readme-ov-file#ngxrematch.
-- `user/IP`: The user or IP address to which the rate limit applies.
-- `limit`: The maximum number of requests allowed within the time window.
-- `window`: The time window in seconds during which the limit applies.
-- `flowRate`: Specifies the rate at which requests are allowed in rps, applicable to `leaky-bucket` (leak rate) and `token-bucket` (refill rate) algorithms. Defaults to `limit/window`.
 
-> 🔹 **Configuration Note**:  
-> Ensure that your `ratelimits.yaml` file is mounted to: `/usr/local/openresty/nginx/lua/ratelimits.yaml`
->
-> 🔹 **Global Rate Limiting (`0.0.0.0/0`)**:  
-> If `0.0.0.0/0` is specified in the rules, rate limiting will be **applied per IP** rather than globally.  
-> For example, if the limit is set to **10 requests per second (RPS)** and two clients: `127.0.0.1` and `127.0.0.2` make requests, each IP will be allowed **10 RPS independently**.
+| Field | Description |
+|---|---|
+| `ignoredSegments` | Users, IPs, and URLs that bypass rate limiting entirely |
+| `rules.<path>` | URI path to match. Use `/` for global. Supports [Lua regex](https://github.com/openresty/lua-nginx-module?tab=readme-ov-file#ngxrematch) |
+| `limit` | Maximum requests allowed within the time window |
+| `window` | Time window in seconds |
+| `flowRate` | Request rate in RPS for `leaky-bucket` (leak rate) and `token-bucket` (refill rate). Defaults to `limit/window` |
+
+> [!NOTE]
+> Mount your `ratelimits.yaml` to: `/usr/local/openresty/nginx/lua/ratelimits.yaml`
+
+> [!NOTE]
+> When `0.0.0.0/0` is specified in rules, rate limiting is applied **per IP**, not globally.  
+> Example: a limit of 10 RPS means `127.0.0.1` and `127.0.0.2` each get 10 RPS independently.
+
+---
 
 ### Environment Variables
 
-|                              | Description                                                                                                                                                                                                                                                                                                                  | Required | Default                         |
-|------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|---------------------------------|
-| `UPSTREAM_PORT`              | The port of the main application.                                                                                                                                                                                                                                                                                            | ✅ | -                               |
-| `UPSTREAM_HOST`              | The hostname of the main application.                                                                                                                                                                                                                                                                                        | ✅ | -                               |
-| `UPSTREAM_TYPE`              | The type of upstream server. Valid values: `http` (for HTTP upstreams) and `fastcgi` (for FastCGI upstreams), and `grpc` (for gRPC upstreams).                                                                                                                                                                                                                | ✅ | `http`                          |
-| `INDEX_FILE`                 | The default index file for FastCGI upstreams.                                                                                                                                                                                                                                                                                | ❌ | `index.php`                     |
-| `SCRIPT_FILENAME`            | The script filename for FastCGI upstreams.                                                                                                                                                                                                                                                                                   | ❌ | `/var/www/app/public/index.php` |
-| `CACHE_HOST`                 | The hostname of the distributed cache.                                                                                                                                                                                                                                                                                       | ✅ | -                               |
-| `CACHE_PORT`                 | The port of the distributed cache.                                                                                                                                                                                                                                                                                           | ✅ | -                               |
-| `CACHE_PROVIDER`             | The provider of the distributed cache, either `redis` or `memcached`.                                                                                                                                                                                                                                                        | ✅ | -                               |
-| `CACHE_PREFIX`               | A unique cache prefix per server group/namespace that reflects the context where rate limits should be applied.                                                                                                                                                                                                              | ✅ | -                               |
-| `CACHE_ALGO`                 | Specifies the rate-limiting algorithm to use. Options: `fixed-window`, `sliding-window`, `leaky-bucket`, or `token-bucket`. Only applicable when using `redis`.                                                                                                                                                              | ❌ | `token-bucket`                  |
-| `REMOTE_IP_KEY`              | Defines the request variable to use as the source IP for rate limiting. Options: <br> - `http_cf_connecting_ip`: Extracts IP from `CF-Connecting-IP` (Cloudflare). <br> - `http_x_forwarded_for`: Uses the first IP in `X-Forwarded-For` header. <br> - `remote_addr`: Uses `ngx.var.remote_addr` (default NGINX client IP). | ✅ | -                               |
-| `PROMETHEUS_METRICS_ENABLED` | Enables Prometheus metrics export.                                                                                                                                                                                                                                                                                           | ❌ | `false`                         |
-| `LOGGING_ENABLED`            | Enables NGINX logs.                                                                                                                                                                                                                                                                                                          | ❌ | `true`                          |
+| Variable | Description | Required | Default |
+|---|---|:---:|---|
+| `UPSTREAM_HOST` | Hostname of the main application | ✅ | — |
+| `UPSTREAM_PORT` | Port of the main application | ✅ | — |
+| `UPSTREAM_TYPE` | Upstream type: `http`, `fastcgi`, or `grpc` | ✅ | `http` |
+| `CACHE_HOST` | Hostname of the distributed cache | ✅ | — |
+| `CACHE_PORT` | Port of the distributed cache | ✅ | — |
+| `CACHE_PROVIDER` | Cache backend: `redis` or `memcached` | ✅ | — |
+| `CACHE_PREFIX` | Unique prefix per server group/namespace | ✅ | — |
+| `REMOTE_IP_KEY` | Source IP variable: `remote_addr`, `http_cf_connecting_ip`, or `http_x_forwarded_for` | ✅ | — |
+| `CACHE_ALGO` | Algorithm: `fixed-window`, `sliding-window`, `leaky-bucket`, `token-bucket` (Redis only) | ❌ | `sliding-window` |
+| `INDEX_FILE` | Default index file for FastCGI | ❌ | `index.php` |
+| `SCRIPT_FILENAME` | Script filename for FastCGI | ❌ | `/var/www/app/public/index.php` |
+| `PROMETHEUS_METRICS_ENABLED` | Enable Prometheus metrics on `:9145/metrics` | ❌ | `false` |
+| `LOGGING_ENABLED` | Enable NGINX logs | ❌ | `true` |
 
+---
 
-
-## Running the Proxy
-
-To run the NGINX Rate Limiter Proxy using Docker, you need to mount the rate limit configuration file and set the required environment variables.
+## 🚀 Running the Proxy
 
 ```sh
 docker run --rm --platform linux/amd64 \
@@ -186,47 +203,38 @@ docker run --rm --platform linux/amd64 \
 
 #### Custom Resolver
 
-You can mount your own `resolver.conf` file to: `/usr/local/openresty/nginx/conf/resolver.conf` in order to use a custom resolver.
+Mount your own resolver config:
 
-## 🔹 Why Use Redis Over Memcached for Rate Limiting?
+```sh
+-v $(pwd)/resolver.conf:/usr/local/openresty/nginx/conf/resolver.conf
+```
 
-When implementing **rate limiting**, Redis is generally preferred over Memcached due to its ability to handle atomic operations and structured data efficiently:
+---
 
-#### ✅ Atomic Operations
-Redis eval commands ensures **race-condition-free** updates. Memcached lacks built-in atomic counters with expiration, making it less reliable for rate limiting.
+## 🔴 Why Redis Over Memcached?
 
-#### ✅ Support for Different Algorithms
-Supports multiple rate-limiting algorithms, including fixed window, sliding window, and token bucket.
+| Capability | Redis | Memcached |
+|---|:---:|:---:|
+| Atomic operations with expiry | ✅ | ❌ |
+| Multiple rate-limiting algorithms | ✅ | ❌ |
+| Lua scripting (`EVAL`) | ✅ | ❌ |
+| Race-condition-free counters | ✅ | ❌ |
 
-#### 🚀 Conclusion
-Redis provides **precise, reliable, and scalable rate limiting**, while Memcached **lacks the necessary atomicity and data structures** for advanced rate-limiting techniques.
+> [!WARNING]
+> **Avoid Redis replicas for rate limiting.** Redis replication is asynchronous — lag between master and replica can cause stale reads that allow requests to bypass limits. Always read and write against the **master instance**.
 
-#### ⚠️ Important: Avoid Using Redis Replicas for Rate Limiting
+---
 
-Using Redis replicas for rate limiting is **not recommended** due to potential delays in data replication. Redis replication is **asynchronous**, meaning there can be a **lag** between the master and replica nodes. This can result in **inconsistent rate limits**, where some requests might pass even after exceeding the limit due to stale data in the replica.
+## 🛠 Extending Nginx Configuration with Snippets
 
-To ensure accurate and real-time enforcement of rate limits:
-- **Always use the Redis master instance** for both read and write operations related to rate limiting.
-- Replicas should only be used for **read-heavy** operations that are not time-sensitive.
+Customize the NGINX configuration by mounting snippet files into the container:
 
-Using a replica for rate limiting can lead to bypassing rate limits and unexpected behaviors, defeating the purpose of traffic control.
-
-## 🛠️ Extending Nginx Configuration with Snippets
-
-This setup allows for easy customization by including additional **snippet** files. These snippets let you extend the core Nginx configuration without modifying `nginx.conf`.
-
-### How It Works
-The Nginx configuration is designed to include external snippet files from the `/usr/local/openresty/nginx/conf/` directory:
-
-- **`http_snippet.conf`**: Modify http settings, applied to the http context.
-- **`server_snippet.conf`**: Modify server-wide settings, applied to the server context.
-- **`location_snippet.conf`**: Customize location-based routing and proxying, applied to the location context.
-- **`resolver.conf`**: Define custom DNS resolvers
-
-Nginx will automatically load these files if they exist.
-
-### How to Add Custom Snippets
-To extend the logic, create your snippet files and mount them into the container:
+| Snippet | Context | Mount Path |
+|---|---|---|
+| `http_snippet.conf` | `http` block | `/usr/local/openresty/nginx/conf/http_snippet.conf` |
+| `server_snippet.conf` | `server` block | `/usr/local/openresty/nginx/conf/server_snippet.conf` |
+| `location_snippet.conf` | `location` block | `/usr/local/openresty/nginx/conf/location_snippet.conf` |
+| `resolver.conf` | DNS resolvers | `/usr/local/openresty/nginx/conf/resolver.conf` |
 
 ```sh
 docker run -d \
@@ -236,55 +244,79 @@ docker run -d \
   ghcr.io/omarfawzi/nginx-ratelimiter-proxy:master
 ```
 
-## Prometheus
+---
 
-### Prerequisite
-- Set `PROMETHEUS_METRICS_ENABLED` to `true`.
+## 📊 Prometheus Metrics
 
-Prometheus metrics are exposed on port `9145` at the `/metrics` endpoint. This can be accessed via:
+> **Prerequisite:** Set `PROMETHEUS_METRICS_ENABLED=true`
+
+Metrics are exposed on port `9145`:
 
 ```sh
 curl http://<server-ip>:9145/metrics
 ```
-This endpoint provides various statistics, including:
 
-- `nginx_proxy_http_requests_total`: Total number of HTTP requests categorized by host and status.
-- `nginx_proxy_http_request_duration_seconds`: Histogram tracking request latency.
-- `nginx_proxy_http_connections`: Gauge tracking active connections (reading, writing, waiting, active).
+| Metric | Type | Description |
+|---|---|---|
+| `nginx_proxy_http_requests_total` | Counter | Total HTTP requests by host and status |
+| `nginx_proxy_http_request_duration_seconds` | Histogram | Request latency distribution |
+| `nginx_proxy_http_connections` | Gauge | Active connections (reading, writing, waiting) |
 
-### Request flow 
+---
+
+## 🔀 Request Flow
 
 ```mermaid
 graph TD
-    subgraph IP Rules
-        CheckIPRule{Is there an exact IP rule?} -->|Yes| ApplyIPRateLimit["Apply Rate Limit for IP"]
-        ApplyIPRateLimit --> CheckLimit{Exceeded Limit?}
+    Start(["🔵 Request Received"]):::startStyle
+
+    CheckIgnore{"Is IP / User / URL<br/>in ignored segments?"}:::decisionStyle
+    CheckIgnore -->|"✅ Yes"| AllowRequest
+
+    CheckIgnore -->|"No"| CheckIP
+
+    subgraph ruleChain [" 📋 Rule Evaluation Chain — in order of precedence "]
+        direction TB
+
+        CheckIP{"1️⃣ Exact IP<br/>rule exists?"}:::ruleStyle
+        CheckIP -->|"Yes"| ApplyIP["Apply IP limit"]:::applyStyle
+        CheckIP -->|"No ↓"| CheckUser
+
+        CheckUser{"2️⃣ User<br/>rule exists?"}:::ruleStyle
+        CheckUser -->|"Yes"| ApplyUser["Apply User limit"]:::applyStyle
+        CheckUser -->|"No ↓"| CheckCIDR
+
+        CheckCIDR{"3️⃣ IP matches<br/>CIDR rule?"}:::ruleStyle
+        CheckCIDR -->|"Yes"| ApplyCIDR["Apply CIDR limit"]:::applyStyle
+        CheckCIDR -->|"No ↓"| CheckGlobal
+
+        CheckGlobal{"4️⃣ Global IP<br/>rule exists?"}:::ruleStyle
+        CheckGlobal -->|"Yes"| ApplyGlobal["Apply Global limit"]:::applyStyle
+        CheckGlobal -->|"No"| AllowRequest
     end
 
-    subgraph User Rules
-        CheckUserRule{Is there a user rule?} -->|Yes| ApplyUserRateLimit["Apply Rate Limit for User"]
-        ApplyUserRateLimit --> CheckLimit
-    end
+    ApplyIP & ApplyUser & ApplyCIDR & ApplyGlobal --> Exceeded
 
-    subgraph CIDR Rules
-        CheckCIDRRule{Does IP match CIDR rule?} -->|Yes| ApplyCIDRRateLimit["Apply Rate Limit for IP CIDR"]
-        ApplyCIDRRateLimit --> CheckLimit
-    end
+    Exceeded{"Limit<br/>exceeded?"}:::decisionStyle
+    Exceeded -->|"❌ Yes"| Throttle(["🔴 429 Too Many Requests"]):::blockStyle
+    Exceeded -->|"✅ No"| AllowRequest(["🟢 Allow Request"]):::allowStyle
 
-    subgraph Global Rules
-        CheckGlobalIPRule{Is there a global IP rule?} -->|Yes| ApplyGlobalIPRateLimit["Apply Global Rate Limit"]
-        ApplyGlobalIPRateLimit --> CheckLimit
-    end
+    Start --> CheckIgnore
 
-    Start["Request Received"] --> CheckIgnore{Is IP/User/Url Ignored?}
-    CheckIgnore -->|Yes| AllowRequest["Allow Request"]
-    CheckIgnore -->|No| CheckIPRule
+    classDef startStyle fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1,font-weight:bold
+    classDef decisionStyle fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#e65100,font-weight:bold
+    classDef ruleStyle fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1.5px,color:#4a148c
+    classDef applyStyle fill:#ede7f6,stroke:#512da8,stroke-width:1.5px,color:#311b92
+    classDef blockStyle fill:#ffebee,stroke:#c62828,stroke-width:2.5px,color:#b71c1c,font-weight:bold
+    classDef allowStyle fill:#e8f5e9,stroke:#2e7d32,stroke-width:2.5px,color:#1b5e20,font-weight:bold
 
-    CheckIPRule -->|No| CheckUserRule
-    CheckUserRule -->|No| CheckCIDRRule
-    CheckCIDRRule -->|No| CheckGlobalIPRule
-    CheckGlobalIPRule -->|No| AllowRequest
-
-    CheckLimit -->|Yes| ThrottleResponse["Return 429 Too Many Requests"]
-    CheckLimit -->|No| AllowRequest
+    style ruleChain fill:#faf5ff,stroke:#7b1fa2,stroke-width:2px,stroke-dasharray:5 5,color:#4a148c
 ```
+
+---
+
+<div align="center">
+
+**MIT License** · Built with [OpenResty](https://openresty.org/) and [lua-resty-global-throttle](https://github.com/ElvinEfendi/lua-resty-global-throttle)
+
+</div>
